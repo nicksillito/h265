@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+# v2.04 24/08/2023  -w and -s take account of number of pixels in image
 # v2.03 18/02/2023  supports av1 as well as h265
 # v2.02 02/05/2020  audiomap added
 # v2.01 26/04/2020  Uses 12 bit encoding (reduces banding) -pix_fmt yuv420p12le
@@ -11,7 +12,6 @@ import subprocess
 import json
 import argparse
 import sys
-import os.path
 import secrets
 import os
 import shlex
@@ -21,9 +21,8 @@ class FFProbe:
     def __init__(self, video_file):
         if not os.path.isfile(video_file):
             raise OSError(video_file+' not found')
-        probe = subprocess.Popen([ 'ffprobe', '-print_format', 'json', '-show_streams', video_file ] ,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL)
+        probe = subprocess.Popen([ 'ffprobe', '-print_format', 'json', '-show_streams',
+         video_file ], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         self.probe=json.load(probe.stdout)
 
     def streams(self):
@@ -227,7 +226,7 @@ if __name__ == '__main__':
     lang=['eng']
 
     if not videoCodec in encoder:
-        raise AssertionError(videoCodec + ' is not supported)')
+        raise SystemExit(f'{videoCodec} is not supported')
 
     # Read some arguements!
     parser = argparse.ArgumentParser(description='Converts video files to h265 format')
@@ -241,7 +240,7 @@ if __name__ == '__main__':
     #Quality options
     parser.add_argument('-H', action='store_true', help='higer quality encode')
     parser.add_argument('-l', action='store_true', help='lower quality encode')
-    parser.add_argument('-n', metavar='level', type=nlm_strength, nargs=1, default=None,
+    parser.add_argument('-n', metavar='level', type=nlm_strength, default=None,
         help='Use noise reducing filter, (strength 1 - 30)')
     parser.add_argument('-L', metavar='lang', action='append', help='Chosen audio language(s)')
 
@@ -275,14 +274,9 @@ if __name__ == '__main__':
         #Background mode -- undertake conversion
        for i in args.file_to_convert:
             video_filter=['yadif=1:-1:1']   #Always deinterlace
-             # Process aspect ratio
-            if args.w:
-                video_filter.append('setsar=1.42')
-            if args.s:
-                video_filter.append('setsar=1')
             # Any noise filter
             if args.n:
-                video_filter.append('nlmeans=s='+str(args.n[0]))
+                video_filter.append('nlmeans=s='+str(args.n))
 
             # Apply quality
             if args.H:
@@ -306,6 +300,13 @@ if __name__ == '__main__':
             probe=FFProbe(i)
             audio=probe.prefer_audio(lang)
 
+             # Process aspect ratio
+            if args.w:
+                video_filter.append('setsar='+str(probe.height(probe.video_stream())/
+                probe.width(probe.video_stream())*16/9))
+            if args.s:
+                video_filter.append('setsar='+str(probe.height(probe.video_stream())/
+                probe.width(probe.video_stream())*4/3))
             # Build video fileter
             if len(video_filter) > 0:
                 vf='-vf '+','.join(video_filter)
