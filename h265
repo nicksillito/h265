@@ -1,0 +1,300 @@
+#!/usr/bin/env python3
+
+# v2.00 17/04/2020    First Issue
+
+import subprocess
+import json
+import argparse
+import sys
+import os.path
+import secrets
+import os
+import shlex
+
+class FFProbe:
+
+    def __init__(self, video_file):
+        if not os.path.isfile(video_file):
+            raise OSError(video_file+' not found')
+        probe = subprocess.Popen([ 'ffprobe', '-print_format', 'json', '-show_streams', video_file ] ,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL)
+        self.probe=json.load(probe.stdout)
+
+    def streams(self):
+        return len(self.probe['streams'])
+
+    def codec_type(self, stream):
+        try:
+            return self.probe['streams'][stream]['codec_type']
+        except:
+            return None
+
+    def codec_name(self, stream):
+        try:
+            return self.probe['streams'][stream]['codec_name']
+        except:
+            return None
+
+    def channels(self, stream):
+        try:
+            return self.probe['streams'][stream]['channels']
+        except:
+            return None
+
+    def default(self, stream):
+        try:
+            return self.probe['streams'][stream]['disposition']['default']
+        except:
+            return 0
+
+    def language(self, stream):
+        try:
+            return self.probe['streams'][stream]['tags']['language']
+        except:
+            return None
+
+    def width(self, stream):
+            try:
+                return self.probe['streams'][stream]['width']
+            except:
+                return None
+
+    def height(self, stream):
+            try:
+                return self.probe['streams'][stream]['height']
+            except:
+                return None
+
+    def duration(self, stream):
+            try:
+                return float(self.probe['streams'][stream]['duration'])
+            except:
+                try:
+                    h, m, s = self.probe['streams'][stream]['tags']['DURATION'].split(':')
+                    return float(h)*3600+float(m)*60+float(s)
+                except:
+                    return None
+
+    def prefer_audio(self, lang=['eng'], codec_pref={'flac': 5, 'pcm': 5, 'ac3': 3}):
+        '''Returns the preferred audiostream
+        Looks for specified language
+        preferred codecs
+        a=defualt track
+        most audio streams (eg prefers 5.1 over stereo)
+        '''
+        best={}
+        for i in lang:
+            best_value=-1
+
+            for j in range(self.streams()):
+                value=0
+                if self.codec_type(j) == 'audio':
+                    if self.language(j) == i:
+                        if self.channels(j) is not None:
+                            value += 100*self.channels(j)
+                        try:
+                            value += 10*codec_pref[self.codec_name(j)]
+                        except:
+                            pass
+                        value += self.default(j)
+                        if value>best_value:
+                            best_value=value
+                            best.update({i: j})
+        if len(best)==0:
+            #If no language matches, select first audio track
+            for j in range(self.streams()):
+                if self.codec_type(j) == 'audio':
+                    best.update({'default': j})
+                    break
+        return best
+
+    def video_stream(self):
+        '''Returns the first video stream it finds
+        '''
+        for i in range(self.streams()):
+            if self.codec_type(i) == 'video':
+                return i
+                break
+        return None
+
+    def encode(self, stream, reencode=['pcm', 'flac', 'alac'], default='libvorbis -q:a 5'):
+        '''suggests either copy or reencode an audio codec
+        '''
+        if self.codec_type(stream) != 'audio':
+            raise AssertionError('Expected an audio stream')
+        if self.codec_name(stream) in reencode:
+            return default
+        else:
+            return 'copy'
+
+class CropDetect:
+    '''Identifies the points to crop a video
+    '''
+    def __init__(self, video_file, skip=.1):
+        probe=FFProbe(video_file)
+        # Points to start and stop searching the file
+        video_stream=probe.video_stream()
+        if probe.duration(video_stream) is not None:
+            trim=[ '-ss', str(skip*probe.duration(video_stream)),
+                '-to', str(probe.duration(video_stream)*(1-skip)) ]
+        else:
+            trim=[]
+        # top left box to "delogo" video
+        tlbox='0:0:' + str(int(probe.width(video_stream)/6)) + ':' + \
+            str(int(probe.height(video_stream)/5.7)) + ':black:t=fill'
+        # Sample a frame every two seconds
+        fps='fps=0.5'
+        crop = subprocess.run([ 'ffmpeg'] + trim + [ '-i', video_file,
+            '-vf', 'fps='+ fps + ',drawbox='+tlbox+',cropdetect', '-f', 'null', '-' ] ,
+            capture_output=True,
+            universal_newlines=True)
+        for i in crop.stderr.split('\n'):
+            if i.startswith('[Parsed_cropdetect'):
+                match=i
+        split1=match.split('=')
+        split2=split1[1].split(':')
+        self.w=int(split2[0])
+        self.h=int(split2[1])
+        self.x=int(split2[2])
+        self.y=int(split2[3])
+
+    def trim_x(self, x=8):
+        '''Reduces the horizontal (x) size of the image
+        '''
+        self.w -= 2*x
+        self.x += x
+
+    def trim_y(self, y=8):
+         '''Reduces the vertical (y) size of the image
+         '''
+         self.h -= 2*y
+         self.y += y
+
+    def filter(self):
+        '''Returns the ffmpeg filter
+        '''
+        return 'crop='+str(self.w)+':'+str(self.h)+':'+str(self.x)+':'+str(self.y)
+
+
+def server():
+    if not os.path.isfile('/usr/local/etc/servername'):
+        raise OSError('servername not specified')
+    with open('/usr/local/etc/servername', 'r', encoding='utf-8') as f:
+        return f.readline().strip()
+
+def nlm_strength(value):
+    '''Limits input value for nlmeans strength to legal range 1 <= x <= 30
+    '''
+    fvalue=float(value)
+    if fvalue < 1 or fvalue > 30:
+        raise argparse.ArgumentTypeError("%s is out of range (1 - 30)" % value)
+    return fvalue
+
+
+
+if __name__ == '__main__':
+
+    crf={'high': 17, 'med': 20, 'low': 23}
+    quality='med'
+    lang=['eng']
+
+    # Read some arguements!
+    parser = argparse.ArgumentParser(description='Converts video files to h265 format')
+    parser.add_argument('file_to_convert', metavar='file', type=str, nargs='+',
+                   help='Filename to be converted')
+    #Crop options
+    parser.add_argument('-c', action='store_true', help="Don't auto crop")
+    parser.add_argument('-x', action='store_true', help='crop the left and right of the image')
+    parser.add_argument('-y', action='store_true', help='crop the top and bottom of the image')
+
+    #Quality options
+    parser.add_argument('-H', action='store_true', help='higer quality encode')
+    parser.add_argument('-l', action='store_true', help='lower quality encode')
+    parser.add_argument('-n', metavar='level', type=nlm_strength, nargs=1, default=None,
+        help='Use noise requcing filter, (strength 1 - 30)')
+    parser.add_argument('-L', metavar='lang', action='append', help='Chosen audio language(s)')
+
+    #Aspect ratio options
+    parser.add_argument('-w', action='store_true', help="Wide screen (16x9) aspect ratio")
+    parser.add_argument('-s', action='store_true', help='Standard screen (4x3) aspect ratio')
+
+    #Background mode -- no help as not a user option
+    parser.add_argument('-B', action='store_true', help=argparse.SUPPRESS)
+
+    args = parser.parse_args()
+
+
+    if not args.B:
+        # Foreground mode -- queue job
+        for i in args.file_to_convert:
+            if not os.path.isfile(i):
+                print ('Cannot read ' + i)
+                quit()
+
+        batch_job='cd '+shlex.quote(os.getcwd())+'\n' + ' ' +sys.argv[0] + ' -B '
+        for i in sys.argv[1:]:
+            batch_job += shlex.quote(i)+' '
+
+        subprocess.run(['ssh', server(), 'batch'],
+            input=batch_job,
+            encoding='utf-8',
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    else:
+        #Background mode -- undertake conversion
+       for i in args.file_to_convert:
+            video_filter=['yadif=1:-1:1']   #Always deinterlace
+             # Process aspect ratio
+            if args.w:
+                video_filter.append('setsar=1.42')
+            if args.s:
+                video_filter.append('setsar=1')
+            # Any noise filter
+            if args.n:
+                video_filter.append('nlmeans=s='+str(args.n[0]))
+
+            # Apply quality
+            if args.H:
+                quality='high'
+            if args.l:
+                quality='low'
+
+            # Crop if required
+            if not args.c:
+                cd=CropDetect(i)
+                if args.x:
+                    cd.trim_x()
+                if args.y:
+                    cd.trim_y()
+                video_filter.append(cd.filter())
+
+            #Build audiomap
+            if args.L:
+                lang=args.L
+
+            audio_map=''
+            probe=FFProbe(i)
+            audio=probe.prefer_audio(lang)
+            for j in audio:
+                audio_map += ' -map 0:'+ str(audio[j])
+                audio_map += ' -c:'+str(audio[j])+' '+probe.encode(audio[j])
+
+
+            if len(video_filter) > 0:
+                vf='-vf '+','.join(video_filter)
+            else:
+                vf=''
+
+            temp_name='/tmp/'+secrets.token_hex(15)+'.mkv'
+            namei, suffixi =os.path.splitext(i)
+            batch_job='cd '+shlex.quote(os.getcwd())+'\n' + \
+                'ffmpeg -y -i '+shlex.quote(i)+' -flags +global_header -map 0:v -c:v libx265 -crf ' + \
+                str(crf[quality])+' ' +vf + audio_map + ' -map 0:s? -c:s copy ' + temp_name +' &&\n' + \
+                'rm '+shlex.quote(i)+' &&\n'+ \
+                'mv '+ temp_name +' '+shlex.quote(namei+'.mkv')
+
+            subprocess.run(['batch'],
+            input=batch_job,
+            universal_newlines=True)
+
