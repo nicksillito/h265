@@ -55,55 +55,89 @@ class FFProbe:
 
     def language(self, stream):
         try:
-            return self.probe['streams'][stream]['tags']['language']
+            return self.probe['streams'][stream]['tags']['language'].lower()
         except:
             return None
 
     def width(self, stream):
-            try:
-                return self.probe['streams'][stream]['width']
-            except:
-                return None
+        try:
+            return self.probe['streams'][stream]['width']
+        except:
+            return None
 
     def height(self, stream):
-            try:
-                return self.probe['streams'][stream]['height']
-            except:
-                return None
+        try:
+            return self.probe['streams'][stream]['height']
+        except:
+            return None
 
     def duration(self, stream):
+        try:
+            return float(self.probe['streams'][stream]['duration'])
+        except:
             try:
-                return float(self.probe['streams'][stream]['duration'])
+                h, m, s = self.probe['streams'][stream]['tags']['DURATION'].split(':')
+                return float(h)*3600+float(m)*60+float(s)
             except:
-                try:
-                    h, m, s = self.probe['streams'][stream]['tags']['DURATION'].split(':')
-                    return float(h)*3600+float(m)*60+float(s)
-                except:
-                    return None
+                return None
+                    
+    def sourceid(self, stream):
+        try:
+            return self.probe['streams'][stream]['tags']['SOURCE_ID-eng']
+        except:
+            return None
+    
+    def bytes(self, stream):
+        try:
+            return int(self.probe['streams'][stream]['tags']['NUMBER_OF_BYTES-eng'])
+        except:
+            return 0
 
-    def prefer_audio(self, lang=None):
+
+    def prefer_audio(self, lang=None, xlang=['nar', 'NAR']):
         # lang is a list of preferred languages (eg ['eng', 'fre']) or None
+        # xlang is a list of languages to be excluded if lang is None
         # Returns a list of the audio tracks matching the specified language
         # or all audio tracks if lang is specified as None
-        best=[]
+        # By default, this will accept all language tracks except nar (narration)
+        selected=[]
+        streamIDs={}    # Dictionary of known stream IDs
         for stream in range(self.streams()):
-            if self.codec_type(stream) == 'audio':
-                    if lang==None or self.language(stream) in lang:
-                        best.append(stream)
+            if self.codec_type(stream)=='audio' and (lang==None and not self.language(stream)
+            in xlang or lang!=None and self.language(stream) in lang):
+                # Look out for duplicate streams on disk (eg DTS and DTS-HD)
+                # Keep the best (assumed to be the largest)
+                if self.sourceid(stream) != None:
+                    # Is this a new stream or a better version of an existing stream
+                    # otherwise we can ignore it (poorer version of known stream)
+                    if not self.sourceid(stream) in streamIDs or \
+                    streamIDs[self.sourceid(stream)]['bytes'] < self.bytes(stream):
+                        # Deselect any previously selected entry
+                        try:
+                            selected.remove(streamIDs[self.sourceid(stream)]['stream'])
+                        except:
+                            pass
+                        # Select current stream    
+                        selected.append(stream)
+                        # And store it
+                        streamIDs[self.sourceid(stream)]={  'stream': stream,
+                                                            'bytes': self.bytes(stream)}
+                else:
+                    # No stream ID so add it anyway
+                    selected.append(stream)
 
-        return best
+        return selected
 
 
     def video_stream(self):
-        '''Returns the first video stream it finds
-        '''
+        # Returns the first video stream
         for i in range(self.streams()):
             if self.codec_type(i) == 'video':
                 return i
                 break
         return None
 
-    def audiomap(self, streams, reencode=['pcm', 'flac', 'alac'],
+    def audiomap(self, streams, reencode=['pcm', 'flac', 'alac', 'dts'],
         codec='libvorbis', quality=5,
         map=0):
         '''returns the required audiomap and conversions
@@ -111,7 +145,7 @@ class FFProbe:
         reencode -- list of codecs to be reencoded (otherwise copy)
         cocde -- codec to use to reencode
         quality -- quality setting to reencode
-        map -- chanel to map
+        map -- channel to map
         '''
         
         encode=[]
@@ -126,13 +160,13 @@ class FFProbe:
                 encode.append(f'-q:a:{s} {quality}')
             else:
                 encode.append(f'-c:a:{s} copy')
+            
             s+=1
         return ' '.join(encode)
 
 
 class CropDetect:
-    '''Identifies the points to crop a video
-    '''
+    # Identifies the points to crop a video
     def __init__(self, video_file, skip=.1):
         probe=FFProbe(video_file)
         # Points to start and stop searching the file
@@ -143,8 +177,8 @@ class CropDetect:
         else:
             trim=[]
         # top left box to "delogo" video
-        tlbox='0:0:' + str(int(probe.width(video_stream)/6)) + ':' + \
-            str(int(probe.height(video_stream)/5.7)) + ':black:t=fill'
+        tlbox=f'0:0:{int(probe.width(video_stream)/6)}:' \
+        f'{int(probe.height(video_stream)/5.7)}:black:t=fill'
         # Sample a frame every two seconds
         fps='fps=0.5'
         crop = subprocess.run([ 'ffmpeg'] + trim + [ '-i', video_file,
@@ -162,20 +196,17 @@ class CropDetect:
         self.y=int(split2[3])
 
     def trim_x(self, x=8):
-        '''Reduces the horizontal (x) size of the image
-        '''
+        # Reduces the horizontal (x) size of the image
         self.w -= 2*x
         self.x += x
 
     def trim_y(self, y=8):
-         '''Reduces the vertical (y) size of the image
-         '''
+         # Reduces the vertical (y) size of the image
          self.h -= 2*y
          self.y += y
 
     def filter(self):
-        '''Returns the ffmpeg filter
-        '''
+        # Returns the ffmpeg filter
         return f'crop={self.w}:{self.h}:{self.x}:{self.y}'
 
 
@@ -187,64 +218,66 @@ def server():
 
 
 def nlm_strength(value):
-    '''Limits input value for nlmeans strength to legal range 1 <= x <= 30
-    '''
+    # Limits input value for nlmeans strength to legal range 1 <= x <= 30
     fvalue=float(value)
     if fvalue < 1 or fvalue > 30:
-        raise argparse.ArgumentTypeError("%s is out of range (1 - 30)" % value)
+        raise argparse.ArgumentTypeError(f'{value} is out of range (1 - 30)')
     return fvalue
 
 
 
 if __name__ == '__main__':
 
-    videoCodec=os.path.basename(sys.argv[0])
+    videoCodec=os.path.basename(sys.argv[0]).split('.')[0]
     encoder={'h265': 'libx265',
-            'av1': 'libaom-av1'}
+            'av1': 'libaom-av1'
+            }
     crf={'h265': {'high': 17, 'med': 20, 'low': 23},
-        'av1': {'high': 23, 'med': 25, 'low': 27}}
+        'av1': {'high': 23, 'med': 25, 'low': 27}
+        }
     quality='med'
-    lang=['eng']
+    lang=None # Default to including all languages
 
     if not videoCodec in encoder:
         raise SystemExit(f'{videoCodec} is not supported')
 
-    # Read some arguements!
+    # Read some arguments!
     parser = argparse.ArgumentParser(description='Converts video files to h265 format')
     parser.add_argument('file_to_convert', metavar='file', type=str, nargs='+',
                    help='Filename to be converted')
-    #Crop options
+    # Crop options
     parser.add_argument('-c', action='store_true', help="Don't auto crop")
     parser.add_argument('-x', action='store_true', help='crop the left and right of the image')
     parser.add_argument('-y', action='store_true', help='crop the top and bottom of the image')
 
-    #Quality options
+    # Quality options
     parser.add_argument('-H', action='store_true', help='higer quality encode')
     parser.add_argument('-l', action='store_true', help='lower quality encode')
     parser.add_argument('-n', metavar='level', type=nlm_strength, default=None,
         help='Use noise reducing filter, (strength 1 - 30)')
-    parser.add_argument('-L', metavar='lang', action='append', help='Chosen audio language(s)')
+    
+    # Select required audio language(s)
+    parser.add_argument('-L', metavar='lang', action='append',
+    help='Specify audio language(s) to include (default:all')
 
-    #Aspect ratio options
+    # Aspect ratio options
     parser.add_argument('-w', action='store_true', help="Wide screen (16x9) aspect ratio")
     parser.add_argument('-s', action='store_true', help='Standard screen (4x3) aspect ratio')
 
-    #Background mode -- no help as not a user option
+    # Background mode -- no help as not a user option
     parser.add_argument('-B', action='store_true', help=argparse.SUPPRESS)
 
     args = parser.parse_args()
-
 
     if not args.B:
         # Foreground mode -- queue job
         for i in args.file_to_convert:
             if not os.path.isfile(i):
-                print ('Cannot read ' + i)
+                print (f'Cannot read {i}')
                 quit()
 
-        batch_job='cd '+shlex.quote(os.getcwd())+'\n' + sys.argv[0] + ' -B '
-        for i in sys.argv[1:]:
-            batch_job += shlex.quote(i)+' '
+        batch_job=f'cd {shlex.quote(os.getcwd())}\n{sys.argv[0]} -B ' +\
+        ' '.join([shlex.quote(_) for _ in sys.argv[1:]])
 
         subprocess.run(['ssh', server(), 'batch'],
             input=batch_job,
@@ -252,7 +285,7 @@ if __name__ == '__main__':
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     else:
-        #Background mode -- undertake conversion
+        # Background mode -- process conversion
        for i in args.file_to_convert:
             video_filter=['yadif=1:-1:1']   #Always deinterlace
             # Any noise filter
@@ -288,7 +321,7 @@ if __name__ == '__main__':
             if args.s:
                 video_filter.append('setsar='+str(probe.height(probe.video_stream())/
                 probe.width(probe.video_stream())*4/3))
-            # Build video fileter
+            # Build video filter
             if len(video_filter) > 0:
                 vf='-vf '+','.join(video_filter)
             else:
