@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+# v2.06 08/06/2024  audio codecs are regular expressions
+#                   first 4 characters of sourceid used to identify different versions
 # v2.05 09/03/2024  maps all audio streams of specified language(s)
 # v2.04 24/08/2023  -w and -s take account of number of pixels in image
 # v2.03 18/02/2023  supports av1 as well as h265
@@ -16,6 +18,7 @@ import sys
 import secrets
 import os
 import shlex
+import re
 
 class FFProbe:
 
@@ -80,13 +83,13 @@ class FFProbe:
                 return float(h)*3600+float(m)*60+float(s)
             except:
                 return None
-                    
+
     def sourceid(self, stream):
         try:
             return self.probe['streams'][stream]['tags']['SOURCE_ID-eng']
         except:
             return None
-    
+
     def bytes(self, stream):
         try:
             return int(self.probe['streams'][stream]['tags']['NUMBER_OF_BYTES-eng'])
@@ -103,29 +106,32 @@ class FFProbe:
         selected=[]
         streamIDs={}    # Dictionary of known stream IDs
         for stream in range(self.streams()):
+            print (stream, self.codec_type(stream), lang, xlang, self.language(stream), self.sourceid(stream))
             if self.codec_type(stream)=='audio' and (lang==None and not self.language(stream)
             in xlang or lang!=None and self.language(stream) in lang):
+                print ('accept')
                 # Look out for duplicate streams on disk (eg DTS and DTS-HD)
                 # Keep the best (assumed to be the largest)
                 if self.sourceid(stream) != None:
                     # Is this a new stream or a better version of an existing stream
                     # otherwise we can ignore it (poorer version of known stream)
-                    if not self.sourceid(stream) in streamIDs or \
-                    streamIDs[self.sourceid(stream)]['bytes'] < self.bytes(stream):
+                    # Use sourceid to try and avoid duplicates of same audio - this is a six figure code
+                    # eg 00 01 01. First four digits appear to identify main stream  and last two are sub id
+                    # and could indicate language, commentary etc.
+                    sourceid=self.sourceid(stream)
+                    if not sourceid in streamIDs or streamIDs[sourceid]['bytes'] < self.bytes(stream):
                         # Deselect any previously selected entry
-                        try:
-                            selected.remove(streamIDs[self.sourceid(stream)]['stream'])
-                        except:
-                            pass
-                        # Select current stream    
+                        if sourceid in streamIDs:
+                            selected.remove(streamIDs[sourceid]['stream'])
+
+                        # Select current stream
                         selected.append(stream)
                         # And store it
-                        streamIDs[self.sourceid(stream)]={  'stream': stream,
-                                                            'bytes': self.bytes(stream)}
+                        streamIDs[sourceid]={  'stream': stream, 'bytes': self.bytes(stream)}
                 else:
                     # No stream ID so add it anyway
                     selected.append(stream)
-
+        print (selected)
         return selected
 
 
@@ -137,17 +143,17 @@ class FFProbe:
                 break
         return None
 
-    def audiomap(self, streams, reencode=['pcm', 'flac', 'alac', 'dts'],
+    def audiomap(self, streams, reencode=['pcm.*', 'flac', 'alac', 'dts', 'truehd'],
         codec='libvorbis', quality=5,
         map=0):
-        '''returns the required audiomap and conversions
-        streams -- list of the channels to be encoded
-        reencode -- list of codecs to be reencoded (otherwise copy)
-        cocde -- codec to use to reencode
-        quality -- quality setting to reencode
-        map -- channel to map
-        '''
-        
+        # Returns the required audiomap and conversions
+        # streams -- list of the channels to be encoded
+        # reencode -- list of codecs to be reencoded (otherwise copy)
+        # a codec can be a regular expression pcm.* includes pcm_s16le pcm_s16be etc
+        # codec -- codec to use to reencode
+        # quality -- quality setting to reencode
+        # map -- channel to map
+
         encode=[]
         s=0
         for i in streams:
@@ -155,12 +161,12 @@ class FFProbe:
                 raise AssertionError('Expected an audio stream')
 
             encode.append(f'-map {map}:{i}')
-            if self.codec_name(i) in reencode:
+            if re.search('|'.join(reencode), self.codec_name(i)):
                 encode.append(f'-c:a:{s} {codec}')
                 encode.append(f'-q:a:{s} {quality}')
             else:
                 encode.append(f'-c:a:{s} copy')
-            
+
             s+=1
         return ' '.join(encode)
 
@@ -251,11 +257,11 @@ if __name__ == '__main__':
     parser.add_argument('-y', action='store_true', help='crop the top and bottom of the image')
 
     # Quality options
-    parser.add_argument('-H', action='store_true', help='higer quality encode')
+    parser.add_argument('-H', action='store_true', help='higher quality encode')
     parser.add_argument('-l', action='store_true', help='lower quality encode')
     parser.add_argument('-n', metavar='level', type=nlm_strength, default=None,
         help='Use noise reducing filter, (strength 1 - 30)')
-    
+
     # Select required audio language(s)
     parser.add_argument('-L', metavar='lang', action='append',
     help='Specify audio language(s) to include (default:all')
