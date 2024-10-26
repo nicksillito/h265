@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 
+# v2.03 18/02/2023  supports av1 as well as h265
 # v2.02 02/05/2020  audiomap added
 # v2.01 26/04/2020  Uses 12 bit encoding (reduces banding) -pix_fmt yuv420p12le
 # v2.00 17/04/2020  First Issue
+
+# to use av1 needs to be linked to h265. Calling program name selects video codec
 
 import subprocess
 import json
@@ -215,10 +218,16 @@ def nlm_strength(value):
 
 if __name__ == '__main__':
 
-    crf={'high': 17, 'med': 20, 'low': 23}
+    videoCodec=os.path.basename(sys.argv[0])
+    encoder={'h265': 'libx265',
+            'av1': 'libaom-av1'}
+    crf={'h265': {'high': 17, 'med': 20, 'low': 23},
+        'av1': {'high': 23, 'med': 25, 'low': 27}}
     quality='med'
     lang=['eng']
-    
+
+    if not videoCodec in encoder:
+        raise AssertionError(videoCodec + ' is not supported)')
 
     # Read some arguements!
     parser = argparse.ArgumentParser(description='Converts video files to h265 format')
@@ -307,8 +316,8 @@ if __name__ == '__main__':
             namei, suffixi =os.path.splitext(i)
             batch_job='cd '+shlex.quote(os.getcwd())+'\n' + \
                 'ffmpeg -y -i '+shlex.quote(i) + \
-                ' -flags +global_header -map 0:v -c:v libx265 -crf ' + \
-                str(crf[quality])+' -pix_fmt yuv420p12le ' + vf + ' ' + \
+                ' -flags +global_header -map 0:v -c:v '+encoder[videoCodec]+' -crf ' + \
+                str(crf[videoCodec][quality])+' -pix_fmt yuv420p12le ' + vf + ' ' + \
                 probe.audiomap(audio.values()) + \
                 ' -map 0:s? -c:s copy ' + temp_name +' &&\n' + \
                 'rm '+shlex.quote(i)+' &&\n'+ \
