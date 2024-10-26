@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+# v2.02 02/05/2020  audiomap added
 # v2.01 26/04/2020  Uses 12 bit encoding (reduces banding) -pix_fmt yuv420p12le
 # v2.00 17/04/2020  First Issue
 
@@ -119,15 +120,32 @@ class FFProbe:
                 break
         return None
 
-    def encode(self, stream, reencode=['pcm', 'flac', 'alac'], default='libvorbis -q:a 5'):
-        '''suggests either copy or reencode an audio codec
+    def audiomap(self, streams, reencode=['pcm', 'flac', 'alac'],
+        codec='libvorbis', quality=5,
+        map=0):
+        '''returns the required audiomap and converfsions
+        streams -- list of the channels to be encoded
+        reencode -- list of codecs to be reencoded (otherwise copy)
+        cocde -- codec to use to reencode
+        quality -- quality setting to reencode
+        map -- chanel to map
         '''
-        if self.codec_type(stream) != 'audio':
-            raise AssertionError('Expected an audio stream')
-        if self.codec_name(stream) in reencode:
-            return default
-        else:
-            return 'copy'
+        
+        encode=[]
+        s=0
+        for i in streams:
+            if self.codec_type(i) != 'audio':
+                raise AssertionError('Expected an audio stream')
+
+            encode.append('-map '+str(map)+':'+str(i))
+            if self.codec_name(i) in reencode:
+                encode.append('-c:a:'+str(s)+' '+codec)
+                encode.append('-q:a:'+str(s)+' '+str(quality))
+            else:
+                encode.append('-c:a:'+str(s)+' copy')
+            s+=1
+        return ' '.join(encode)
+
 
 class CropDetect:
     '''Identifies the points to crop a video
@@ -184,6 +202,7 @@ def server():
     with open('/usr/local/etc/servername', 'r', encoding='utf-8') as f:
         return f.readline().strip()
 
+
 def nlm_strength(value):
     '''Limits input value for nlmeans strength to legal range 1 <= x <= 30
     '''
@@ -234,7 +253,7 @@ if __name__ == '__main__':
                 print ('Cannot read ' + i)
                 quit()
 
-        batch_job='cd '+shlex.quote(os.getcwd())+'\n' + ' ' +sys.argv[0] + ' -B '
+        batch_job='cd '+shlex.quote(os.getcwd())+'\n' + sys.argv[0] + ' -B '
         for i in sys.argv[1:]:
             batch_job += shlex.quote(i)+' '
 
@@ -271,20 +290,14 @@ if __name__ == '__main__':
                     cd.trim_y()
                 video_filter.append(cd.filter())
 
-            #Build audiomap
+            # Select audio stream(s)
             if args.L:
                 lang=args.L
 
-            audio_map=''
-            s=0
             probe=FFProbe(i)
             audio=probe.prefer_audio(lang)
-            for j in audio:
-                audio_map += ' -map 0:'+ str(audio[j])
-                audio_map += ' -c:a:'+str(s)+' '+probe.encode(audio[j])
-                s+=1
 
-
+            # Build video fileter
             if len(video_filter) > 0:
                 vf='-vf '+','.join(video_filter)
             else:
@@ -295,7 +308,8 @@ if __name__ == '__main__':
             batch_job='cd '+shlex.quote(os.getcwd())+'\n' + \
                 'ffmpeg -y -i '+shlex.quote(i) + \
                 ' -flags +global_header -map 0:v -c:v libx265 -crf ' + \
-                str(crf[quality])+' -pix_fmt yuv420p12le ' +vf + audio_map + \
+                str(crf[quality])+' -pix_fmt yuv420p12le ' + vf + ' ' + \
+                probe.audiomap(audio.values()) + \
                 ' -map 0:s? -c:s copy ' + temp_name +' &&\n' + \
                 'rm '+shlex.quote(i)+' &&\n'+ \
                 'mv '+ temp_name +' '+shlex.quote(namei+'.mkv')
