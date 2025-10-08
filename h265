@@ -1,13 +1,6 @@
 #!/usr/bin/env python3
 
-# v2.06 08/06/2024  audio codecs are regular expressions
-#                   first 4 characters of sourceid used to identify different versions
-# v2.05 09/03/2024  maps all audio streams of specified language(s)
-# v2.04 24/08/2023  -w and -s take account of number of pixels in image
-# v2.03 18/02/2023  supports av1 as well as h265
-# v2.02 02/05/2020  audiomap added
-# v2.01 26/04/2020  Uses 12 bit encoding (reduces banding) -pix_fmt yuv420p12le
-# v2.00 17/04/2020  First Issue
+# h265 & av1 -- converts a video file to the new format
 
 # to use av1 needs to be linked to h265. Calling program name selects video codec
 
@@ -106,10 +99,8 @@ class FFProbe:
         selected=[]
         streamIDs={}    # Dictionary of known stream IDs
         for stream in range(self.streams()):
-            print (stream, self.codec_type(stream), lang, xlang, self.language(stream), self.sourceid(stream))
             if self.codec_type(stream)=='audio' and (lang==None and not self.language(stream)
             in xlang or lang!=None and self.language(stream) in lang):
-                print ('accept')
                 # Look out for duplicate streams on disk (eg DTS and DTS-HD)
                 # Keep the best (assumed to be the largest)
                 if self.sourceid(stream) != None:
@@ -131,7 +122,6 @@ class FFProbe:
                 else:
                     # No stream ID so add it anyway
                     selected.append(stream)
-        print (selected)
         return selected
 
 
@@ -182,38 +172,61 @@ class CropDetect:
                 '-to', str(probe.duration(video_stream)*(1-skip)) ]
         else:
             trim=[]
+
         # top left box to "delogo" video
         tlbox=f'0:0:{int(probe.width(video_stream)/6)}:' \
         f'{int(probe.height(video_stream)/5.7)}:black:t=fill'
+
         # Sample a frame every two seconds
         fps='fps=0.5'
         crop = subprocess.run([ 'ffmpeg'] + trim + [ '-i', video_file,
             '-vf', f'fps={fps},drawbox={tlbox},cropdetect', '-f', 'null', '-' ] ,
             capture_output=True,
             universal_newlines=True)
+
+        # Search for the crop detect result in the standard error output
+        # Example output:
+        # [Parsed_cropdetect_2 @ 0x5980dd8fe480] x1:0 x2:1279 y1:0 y2:1023 w:1280 h:1024 x:0 y:0 pts:134 t:268.000000 limit:0.094118 crop=1280:1024:0:0
+        # We are only interested in the last crop detect (once all video has been assessed)
+        match = None
         for i in crop.stderr.split('\n'):
             if i.startswith('[Parsed_cropdetect'):
                 match=i
-        split1=match.split('=')
-        split2=split1[1].split(':')
-        self.w=int(split2[0])
-        self.h=int(split2[1])
-        self.x=int(split2[2])
-        self.y=int(split2[3])
+
+        if match:
+            # We have a match -- therefore pull out all the values
+            split1=match.split('=')
+            split2=split1[1].split(':')
+            self.w=int(split2[0])
+            self.h=int(split2[1])
+            self.x=int(split2[2])
+            self.y=int(split2[3])
+        else:
+            # No match -- return null results
+            self.w = None
+            self.h = None
+            self.x = None
+            self.y = None
 
     def trim_x(self, x=8):
         # Reduces the horizontal (x) size of the image
-        self.w -= 2*x
-        self.x += x
+        # Test x and w to make sure its not a null result
+        if self.w and self.x:
+            self.w -= 2*x
+            self.x += x
 
     def trim_y(self, y=8):
-         # Reduces the vertical (y) size of the image
-         self.h -= 2*y
-         self.y += y
+        # Reduces the vertical (y) size of the image
+        # Test h and y to make sure its not a null result
+        if self.h and self.y:
+            self.h -= 2*y
+            self.y += y
 
     def filter(self):
-        # Returns the ffmpeg filter
-        return f'crop={self.w}:{self.h}:{self.x}:{self.y}'
+        # Returns the ffmpeg filter (if not null) (if not specified, a None will be returned)
+        if self.x and self.y and self.w and self.h:
+            return f'crop={self.w}:{self.h}:{self.x}:{self.y}'
+
 
 
 def server():
@@ -309,9 +322,13 @@ if __name__ == '__main__':
                 cd=CropDetect(i)
                 if args.x:
                     cd.trim_x()
+
                 if args.y:
                     cd.trim_y()
-                video_filter.append(cd.filter())
+
+                # Is there a valid filter result?
+                if cd.filter():
+                    video_filter.append(cd.filter())
 
             # Select audio stream(s)
             if args.L:
