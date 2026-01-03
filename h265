@@ -9,45 +9,40 @@ import json
 import argparse
 import sys
 import secrets
-import os
 import shlex
 import re
+import tempfile
+from pathlib import Path
 
 class FFProbe:
 
     def __init__(self, video_file):
-        if not os.path.isfile(video_file):
-            raise OSError(video_file+' not found')
+        if not video_file.is_file:
+            raise OSError(str(video_file) + ' not found')
         probe = subprocess.Popen([ 'ffprobe', '-print_format', 'json', '-show_streams',
          video_file ], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         self.probe=json.load(probe.stdout)
 
+
     def streams(self):
         return len(self.probe['streams'])
 
+
     def codec_type(self, stream):
-        try:
-            return self.probe['streams'][stream]['codec_type']
-        except:
-            return None
+        return self.probe['streams'][stream].get('codec_type')
+
 
     def codec_name(self, stream):
-        try:
-            return self.probe['streams'][stream]['codec_name']
-        except:
-            return None
+        return self.probe['streams'][stream].get('codec_name')
+
 
     def channels(self, stream):
-        try:
-            return self.probe['streams'][stream]['channels']
-        except:
-            return None
+        return self.probe['streams'][stream].get('channels')
+
 
     def default(self, stream):
-        try:
-            return self.probe['streams'][stream]['disposition']['default']
-        except:
-            return 0
+        return self.probe['streams'][stream]['disposition'].get('default', 0)
+
 
     def language(self, stream):
         try:
@@ -55,39 +50,31 @@ class FFProbe:
         except:
             return None
 
+
     def width(self, stream):
-        try:
-            return self.probe['streams'][stream]['width']
-        except:
-            return None
+        return self.probe['streams'][stream].get('width')
+ 
 
     def height(self, stream):
-        try:
-            return self.probe['streams'][stream]['height']
-        except:
-            return None
+            return self.probe['streams'][stream].get('height')
+
 
     def duration(self, stream):
-        try:
+        if 'duration' in self.probe['streams'][stream]:
             return float(self.probe['streams'][stream]['duration'])
-        except:
-            try:
-                h, m, s = self.probe['streams'][stream]['tags']['DURATION'].split(':')
-                return float(h)*3600+float(m)*60+float(s)
-            except:
-                return None
-
-    def sourceid(self, stream):
-        try:
-            return self.probe['streams'][stream]['tags']['SOURCE_ID-eng']
-        except:
+        elif 'DURATION' in self.probe['streams'][stream]['tags']['DURATION']:
+            h, m, s = self.probe['streams'][stream]['tags']['DURATION'].split(':')
+            return float(h)*3600+float(m)*60+float(s)
+        else:
             return None
 
+
+    def sourceid(self, stream):
+        return self.probe['streams'][stream]['tags'].get('SOURCE_ID-eng')
+
+
     def bytes(self, stream):
-        try:
-            return int(self.probe['streams'][stream]['tags']['NUMBER_OF_BYTES-eng'])
-        except:
-            return 0
+        return int(self.probe['streams'][stream]['tags'].get('NUMBER_OF_BYTES-eng', 0))
 
 
     def prefer_audio(self, lang=None, xlang=['nar', 'NAR']):
@@ -150,15 +137,15 @@ class FFProbe:
             if self.codec_type(i) != 'audio':
                 raise AssertionError('Expected an audio stream')
 
-            encode.append(f'-map {map}:{i}')
+            encode.extend([ '-map', f'{map}:{i}' ])
             if re.search('|'.join(reencode), self.codec_name(i)):
-                encode.append(f'-c:a:{s} {codec}')
-                encode.append(f'-q:a:{s} {quality}')
+                encode.extend([ f'-c:a:{s}', codec ])
+                encode.extend([ f'-q:a:{s}', quality ])
             else:
-                encode.append(f'-c:a:{s} copy')
+                encode.extend([ f'-c:a:{s}', 'copy'])
 
             s+=1
-        return ' '.join(encode)
+        return encode
 
 
 class CropDetect:
@@ -174,13 +161,9 @@ class CropDetect:
             trim=[]
 
         # top left box to "delogo" video
-        tlbox=f'0:0:{int(probe.width(video_stream)/6)}:' \
-        f'{int(probe.height(video_stream)/5.7)}:black:t=fill'
-
-        # Sample a frame every two seconds
-        fps='fps=0.5'
-        crop = subprocess.run([ 'ffmpeg'] + trim + [ '-i', video_file,
-            '-vf', f'fps={fps},drawbox={tlbox},cropdetect', '-f', 'null', '-' ] ,
+        tlbox=f'0:0:{int(probe.width(video_stream)/6)}:{int(probe.height(video_stream)/5.7)}:black:t=fill'
+        crop = subprocess.run([ 'ffmpeg' ] + trim + [ '-i', video_file,
+            '-vf', f'drawbox={tlbox},cropdetect', '-f', 'null', '-' ] ,
             capture_output=True,
             universal_newlines=True)
 
@@ -208,6 +191,7 @@ class CropDetect:
             self.x = None
             self.y = None
 
+
     def trim_x(self, x=8):
         # Reduces the horizontal (x) size of the image
         # Test x and w to make sure its not a null result
@@ -224,15 +208,16 @@ class CropDetect:
 
     def filter(self):
         # Returns the ffmpeg filter (if not null) (if not specified, a None will be returned)
-        if self.x and self.y and self.w and self.h:
+        # Just check width and height (must be not null and not zero)
+        if self.w and self.h:
             return f'crop={self.w}:{self.h}:{self.x}:{self.y}'
 
 
 
-def server():
-    if not os.path.isfile('/usr/local/etc/servername'):
+def server(servernamefile=Path('/usr/local/etc/servername')):
+    if not servernamefile.is_file:
         raise OSError('servername not specified')
-    with open('/usr/local/etc/servername', 'r', encoding='utf-8') as f:
+    with open(servernamefile, 'r', encoding='utf-8') as f:
         return f.readline().strip()
 
 
@@ -244,10 +229,18 @@ def nlm_strength(value):
     return fvalue
 
 
+def file(value):
+    # Checks a file name exists and returns it as an object
+    fo=Path(value)
+    if fo.exists():
+        return fo
+    else:
+        raise argparse.ArgumentTypeError(f'{value}: file not found')
+
 
 if __name__ == '__main__':
 
-    videoCodec=os.path.basename(sys.argv[0]).split('.')[0]
+    videoCodec=Path(sys.argv[0]).stem
     encoder={'h265': 'libx265',
             'av1': 'libaom-av1'
             }
@@ -256,13 +249,14 @@ if __name__ == '__main__':
         }
     quality='med'
     lang=None # Default to including all languages
+    suffix='.mkv'
 
     if not videoCodec in encoder:
         raise SystemExit(f'{videoCodec} is not supported')
 
     # Read some arguments!
     parser = argparse.ArgumentParser(description='Converts video files to h265 format')
-    parser.add_argument('file_to_convert', metavar='file', type=str, nargs='+',
+    parser.add_argument('file_to_convert', metavar='file', type=file, nargs='+',
                    help='Filename to be converted')
     # Crop options
     parser.add_argument('-c', action='store_true', help="Don't auto crop")
@@ -290,18 +284,19 @@ if __name__ == '__main__':
 
     if not args.B:
         # Foreground mode -- queue job
-        for i in args.file_to_convert:
-            if not os.path.isfile(i):
-                print (f'Cannot read {i}')
-                quit()
 
-        batch_job=f'cd {shlex.quote(os.getcwd())}\n{sys.argv[0]} -B ' +\
-        ' '.join([shlex.quote(_) for _ in sys.argv[1:]])
+        # Modify the inital command to include -B as first option, and strip out the file names
+        # assume file names at the end
+        # so 'h265 -w file1 file2' becomes 'h265 -B -w' 
+        batch_job = sys.argv[:len(sys.argv) - len(args.file_to_convert)]
+        batch_job.insert(1, '-B')
 
-        subprocess.run(['ssh', server(), 'batch'],
-            input=batch_job,
-            encoding='utf-8',
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # And create a batch job for each file
+        for file in args.file_to_convert:
+            subprocess.run(['ssh', server(), 'batch'],
+                input=' '.join([shlex.quote(_) for _ in batch_job + [file]]),
+                encoding='utf-8',
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     else:
         # Background mode -- process conversion
@@ -344,24 +339,28 @@ if __name__ == '__main__':
             if args.s:
                 video_filter.append('setsar='+str(probe.height(probe.video_stream())/
                 probe.width(probe.video_stream())*4/3))
+
             # Build video filter
-            if len(video_filter) > 0:
-                vf='-vf '+','.join(video_filter)
+            vf = ','.join(video_filter)
+
+            tmp = Path(tempfile.mkdtemp())
+            outfile = tmp / f'outfile{suffix}'
+
+            command = [ 'ffmpeg', '-y', '-i', i, '-flags', '+global_header', '-map',
+                    '0:v', '-c:v', encoder[videoCodec], '-crf', f'{crf[videoCodec][quality]}',
+                    '-pix_fmt', 'yuv420p12le', '-vf', vf ] + probe.audiomap(audio) + ['-map', '0:s?',
+                    '-c:s', 'copy', str(outfile) ]
+            
+            encode = subprocess.run(command, capture_output=True, encoding='utf-8')
+            # Check it worked
+            if encode.returncode == 0:
+                # Delete original and replace with the new version
+                i.unlink()
+                outfile.move(i.with_suffix(suffix))
             else:
-                vf=''
+                # Show the command and the error message
+                print (command)
+                print (encode.stderr.read())
+                outfile.unlink()
 
-            temp_name=f'/tmp/{secrets.token_hex(15)}.mkv'
-            namei, suffixi =os.path.splitext(i)
-            batch_job='cd '+shlex.quote(os.getcwd())+'\n' + \
-                'ffmpeg -y -i '+shlex.quote(i) + \
-                ' -flags +global_header -map 0:v -c:v '+encoder[videoCodec]+' -crf ' + \
-                str(crf[videoCodec][quality])+' -pix_fmt yuv420p12le ' + vf + ' ' + \
-                probe.audiomap(audio) + \
-                ' -map 0:s? -c:s copy ' + temp_name +' &&\n' + \
-                'rm '+shlex.quote(i)+' &&\n'+ \
-                'mv '+ temp_name +' '+shlex.quote(namei+'.mkv')
-
-            subprocess.run(['batch'],
-            input=batch_job,
-            universal_newlines=True)
-
+            tmp.rmdir()
