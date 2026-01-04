@@ -12,6 +12,7 @@ import shlex
 import re
 import tempfile
 from pathlib import Path
+import shutil
 
 class FFProbe:
 
@@ -61,8 +62,11 @@ class FFProbe:
     def duration(self, stream):
         if 'duration' in self.probe['streams'][stream]:
             return float(self.probe['streams'][stream]['duration'])
-        elif 'DURATION' in self.probe['streams'][stream]['tags']['DURATION']:
+        elif 'tags' in self.probe['streams'][stream] and 'DURATION' in self.probe['streams'][stream]['tags']:
             h, m, s = self.probe['streams'][stream]['tags']['DURATION'].split(':')
+            return float(h)*3600+float(m)*60+float(s)
+        elif 'tags' in self.probe['streams'][stream] and 'DURATION-eng' in self.probe['streams'][stream]['tags']:
+            h, m, s = self.probe['streams'][stream]['tags']['DURATION-eng'].split(':')
             return float(h)*3600+float(m)*60+float(s)
         else:
             return None
@@ -194,14 +198,14 @@ class CropDetect:
     def trim_x(self, x=8):
         # Reduces the horizontal (x) size of the image
         # Test x and w to make sure its not a null result
-        if self.w and self.x:
+        if self.w:
             self.w -= 2*x
             self.x += x
 
     def trim_y(self, y=8):
         # Reduces the vertical (y) size of the image
         # Test h and y to make sure its not a null result
-        if self.h and self.y:
+        if self.h:
             self.h -= 2*y
             self.y += y
 
@@ -248,10 +252,10 @@ if __name__ == '__main__':
         }
     
     # Options for colour depth
-    depth = { '8': 'yuv420p',
-             '10': 'yuv420p10le',
-             '12': 'yuv420p12le',
-             '14': 'yuv420p14le'}
+    depth = { 8: 'yuv420p',
+             10: 'yuv420p10le',
+             12: 'yuv420p12le',
+             14: 'yuv420p14le'}
     quality='med'
     lang=None # Default to including all languages
     suffix='.mkv'
@@ -274,7 +278,7 @@ if __name__ == '__main__':
     parser.add_argument('-n', metavar='level', type=nlm_strength, default=None,
         help='Use noise reducing filter, (strength 1 - 30)')
     parser.add_argument('-d', metavar='bit_depth', help='specify colour bit depth',
-                         choices=list(depth.keys()), action='store', default='10')
+                         choices=list(depth.keys()), action='store', default=10, type=int)
 
     # Select required audio language(s)
     parser.add_argument('-L', metavar='lang', action='append',
@@ -302,7 +306,7 @@ if __name__ == '__main__':
         # so 'h265 -B -w file1' and 'h265 -B -w file2'
         for file in args.file_to_convert:
             subprocess.run(['ssh', server(), 'batch'],
-                input=' '.join([shlex.quote(_) for _ in batch_job + [str(file)]]),
+                input=' '.join([shlex.quote(_) for _ in batch_job + [str(file.absolute())]]),
                  encoding='utf-8', capture_output=True )
 
     else:
@@ -351,9 +355,9 @@ if __name__ == '__main__':
             vf = ','.join(video_filter)
 
             tmp = Path(tempfile.mkdtemp())
-            outfile = tmp / f'outfile{suffix}'
+            outfile = tmp / i.with_suffix(suffix).name
 
-            command = [ 'ffmpeg', '-y', '-i', i, '-flags', '+global_header', '-map',
+            command = [ 'ffmpeg', '-y', '-i', str(i), '-flags', '+global_header', '-map',
                     '0:v', '-c:v', encoder[videoCodec], '-crf', f'{crf[videoCodec][quality]}',
                     '-pix_fmt', depth[args.d], '-vf', vf ] + probe.audiomap(audio) + ['-map', '0:s?',
                     '-c:s', 'copy', str(outfile) ]
@@ -363,11 +367,12 @@ if __name__ == '__main__':
             if encode.returncode == 0:
                 # Delete original and replace with the new version
                 i.unlink()
-                outfile.move(i.with_suffix(suffix))
+                shutil.move(outfile, i.with_suffix(suffix))
             else:
                 # Show the command and the error message
                 print (command)
                 print (encode.stderr)
                 outfile.unlink()
 
+            # Tidy up -- remove the temporary directory
             tmp.rmdir()
