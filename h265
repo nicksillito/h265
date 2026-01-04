@@ -65,8 +65,9 @@ class FFProbe:
         elif 'tags' in self.probe['streams'][stream] and 'DURATION' in self.probe['streams'][stream]['tags']:
             h, m, s = self.probe['streams'][stream]['tags']['DURATION'].split(':')
             return float(h)*3600+float(m)*60+float(s)
-        elif 'tags' in self.probe['streams'][stream] and 'DURATION-eng' in self.probe['streams'][stream]['tags']:
-            h, m, s = self.probe['streams'][stream]['tags']['DURATION-eng'].split(':')
+        elif 'tags' in self.probe['streams'][stream] and 'language' in self.probe['streams'][stream]['tags'] and \
+            'DURATION-'+self.probe['streams'][stream]['tags']['language'] in self.probe['streams'][stream]['tags']:
+            h, m, s = self.probe['streams'][stream]['tags']['DURATION-'+self.probe['streams'][stream]['tags']['language']].split(':')
             return float(h)*3600+float(m)*60+float(s)
         else:
             return None
@@ -143,9 +144,9 @@ class FFProbe:
             encode.extend([ '-map', f'{map}:{i}' ])
             if re.search('|'.join(reencode), self.codec_name(i)):
                 encode.extend([ f'-c:a:{s}', codec ])
-                encode.extend([ f'-q:a:{s}', quality ])
+                encode.extend([ f'-q:a:{s}', str(quality) ])
             else:
-                encode.extend([ f'-c:a:{s}', 'copy'])
+                encode.extend([ f'-c:a:{s}', 'copy' ])
 
             s+=1
         return encode
@@ -361,7 +362,7 @@ if __name__ == '__main__':
                     '0:v', '-c:v', encoder[videoCodec], '-crf', f'{crf[videoCodec][quality]}',
                     '-pix_fmt', depth[args.d], '-vf', vf ] + probe.audiomap(audio) + ['-map', '0:s?',
                     '-c:s', 'copy', str(outfile) ]
-            
+
             encode = subprocess.run(command, capture_output=True, encoding='utf-8')
             # Check it worked
             if encode.returncode == 0:
