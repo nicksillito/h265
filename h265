@@ -74,8 +74,11 @@ class FFProbe:
 
 
     def sourceid(self, stream):
-        return self.probe['streams'][stream]['tags'].get('SOURCE_ID-eng')
-
+        try:
+            return self.probe['streams'][stream]['tags']['SOURCE_ID-eng']
+        except KeyError:
+            return None
+        
 
     def bytes(self, stream):
         return int(self.probe['streams'][stream]['tags'].get('NUMBER_OF_BYTES-eng', 0))
@@ -125,8 +128,7 @@ class FFProbe:
         return None
 
     def audiomap(self, streams, reencode=['pcm.*', 'flac', 'alac', 'dts', 'truehd'],
-        codec='libvorbis', quality=5,
-        map=0):
+        codec='libvorbis', quality=5, map=0):
         # Returns the required audiomap and conversions
         # streams -- list of the channels to be encoded
         # reencode -- list of codecs to be reencoded (otherwise copy)
@@ -144,7 +146,7 @@ class FFProbe:
             encode.extend([ '-map', f'{map}:{i}' ])
             if re.search('|'.join(reencode), self.codec_name(i)):
                 encode.extend([ f'-c:a:{s}', codec ])
-                encode.extend([ f'-q:a:{s}', str(quality) ])
+                encode.extend([ f'-q:a:{s}', f'{quality}' ])
             else:
                 encode.extend([ f'-c:a:{s}', 'copy' ])
 
@@ -188,6 +190,12 @@ class CropDetect:
             self.h=int(split2[1])
             self.x=int(split2[2])
             self.y=int(split2[3])
+            if self.w < 1 or self.h < 1:
+                self.w = None
+                self.h = None
+                self.x = None
+                self.y = None
+
         else:
             # No match -- return null results
             self.w = None
@@ -257,8 +265,9 @@ if __name__ == '__main__':
              10: 'yuv420p10le',
              12: 'yuv420p12le',
              14: 'yuv420p14le'}
+    depthdefault = {'h265': 10, 'av1': 8}
     quality='med'
-    lang=None # Default to including all languages
+    lang=None #Default to including all languages
     suffix='.mkv'
 
     if not videoCodec in encoder:
@@ -279,11 +288,11 @@ if __name__ == '__main__':
     parser.add_argument('-n', metavar='level', type=nlm_strength, default=None,
         help='Use noise reducing filter, (strength 1 - 30)')
     parser.add_argument('-d', metavar='bit_depth', help='specify colour bit depth',
-                         choices=list(depth.keys()), action='store', default=10, type=int)
+                         choices=list(depth.keys()), action='store', default=depthdefault[videoCodec], type=int)
 
     # Select required audio language(s)
     parser.add_argument('-L', metavar='lang', action='append',
-    help='Specify audio language(s) to include (default:all')
+    help='Specify audio language(s) to include (default:all)')
 
     # Aspect ratio options
     parser.add_argument('-w', action='store_true', help="Wide screen (16x9) aspect ratio")
@@ -359,7 +368,7 @@ if __name__ == '__main__':
             outfile = tmp / i.with_suffix(suffix).name
 
             command = [ 'ffmpeg', '-y', '-i', str(i), '-flags', '+global_header', '-map',
-                    '0:v', '-c:v', encoder[videoCodec], '-crf', f'{crf[videoCodec][quality]}',
+                    '0:v:0', '-c:v', encoder[videoCodec], '-crf', f'{crf[videoCodec][quality]}',
                     '-pix_fmt', depth[args.d], '-vf', vf ] + probe.audiomap(audio) + ['-map', '0:s?',
                     '-c:s', 'copy', str(outfile) ]
 
