@@ -168,8 +168,10 @@ class CropDetect:
 
         # top left box to "delogo" video
         tlbox=f'0:0:{int(probe.width(video_stream)/6)}:{int(probe.height(video_stream)/5.7)}:black:t=fill'
+        # cropdetect=24:2:0 means set black threshold to 24/255 (default), round crop to 2 pixels (even only) (default 16), and
+        # skip no frames at the start
         crop = subprocess.run([ 'ffmpeg' ] + trim + [ '-i', video_file,
-            '-vf', f'drawbox={tlbox},cropdetect', '-f', 'null', '-' ] ,
+            '-vf', f'drawbox={tlbox},cropdetect=24:2:0', '-f', 'null', '-' ] ,
             capture_output=True,
             universal_newlines=True)
 
