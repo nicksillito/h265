@@ -324,7 +324,7 @@ if __name__ == '__main__':
     else:
         # Background mode -- process conversion
        for i in args.file_to_convert:
-            video_filter=['yadif=1:-1:1']   #Always deinterlace
+            video_filter=['bwdif=1:-1:1']   # Always deinterlace
             # Any noise filter
             if args.n:
                 video_filter.append(f'nlmeans=s={args.n}')
