@@ -13,6 +13,7 @@ import re
 import tempfile
 from pathlib import Path
 import shutil
+import os
 
 class FFProbe:
 
@@ -245,11 +246,14 @@ def nlm_strength(value):
 
 def file(value):
     # Checks a file name exists and returns it as an object
-    fo=Path(value)
-    if fo.exists():
-        return fo
-    else:
+    fo = Path(value)
+    if not fo.exists():
         raise argparse.ArgumentTypeError(f'{value}: file not found')
+    if not os.access(fo, os.R_OK):
+        raise argparse.ArgumentTypeError(f'{value}: not readable')
+    if not os.access(fo, os.W_OK):
+        raise argparse.ArgumentTypeError(f'{value}: not writable')
+    return fo    
 
 
 if __name__ == '__main__':
