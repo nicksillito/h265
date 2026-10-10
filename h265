@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 
-# h265 & av1 -- converts a video file to the new format
-
-# to use av1 needs to be linked to h265. Calling program name selects video codec
+# h265 -- converts a video file to the new format
 
 import subprocess
 import json
@@ -14,15 +12,23 @@ import tempfile
 from pathlib import Path
 import shutil
 import os
+import math
 
 class FFProbe:
 
     def __init__(self, video_file):
-        if not video_file.is_file:
-            raise OSError(str(video_file) + ' not found')
+        if not video_file.is_file():
+            raise OSError(f'{video_file} not found')
         probe = subprocess.Popen([ 'ffprobe', '-print_format', 'json', '-show_streams',
          video_file ], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         self.probe=json.load(probe.stdout)
+        self._file = video_file
+        # Returns the first video stream
+        self.video0 = None
+        for i in range(self.streams()):
+            if self.codec_type(i) == 'video':
+                self.video0 = i
+                break
 
 
     def streams(self):
@@ -52,15 +58,34 @@ class FFProbe:
             return None
 
 
-    def width(self, stream):
+    def width(self, stream=None):
+        if stream is None:
+            stream = self.video0
         return self.probe['streams'][stream].get('width')
  
 
-    def height(self, stream):
-            return self.probe['streams'][stream].get('height')
+    def height(self, stream=None):
+        if stream is None:
+            stream = self.video0
+
+        return self.probe['streams'][stream].get('height')
 
 
-    def duration(self, stream):
+    def frame_rate(self, stream=None):
+        # Returns the frame rate as a fraction string, eg '24000/1001'
+        if stream is None:
+            stream = self.video0
+        return self.probe['streams'][stream].get('r_frame_rate')
+
+
+    def has_subtitles(self):
+        return any(self.codec_type(i) == 'subtitle' for i in range(self.streams()))
+
+
+    def duration(self, stream=None):
+        if stream is None:
+            stream = self.video0
+
         if 'duration' in self.probe['streams'][stream]:
             return float(self.probe['streams'][stream]['duration'])
         elif 'tags' in self.probe['streams'][stream] and 'DURATION' in self.probe['streams'][stream]['tags']:
@@ -74,59 +99,89 @@ class FFProbe:
             return None
 
 
+    def tag(self, stream, name):
+        # Returns a stream tag, accepting either the language-suffixed form
+        # written by MakeMKV (eg SOURCE_ID-eng) or the plain form written by
+        # other tools such as mkvpropedit (eg NUMBER_OF_BYTES)
+        tags = self.probe['streams'][stream].get('tags', {})
+        for key in (f'{name}-eng', name):
+            if key in tags:
+                return tags[key]
+        return None
+
+
     def sourceid(self, stream):
-        try:
-            return self.probe['streams'][stream]['tags']['SOURCE_ID-eng']
-        except KeyError:
-            return None
-        
+        return self.tag(stream, 'SOURCE_ID')
+
 
     def bytes(self, stream):
-        return int(self.probe['streams'][stream]['tags'].get('NUMBER_OF_BYTES-eng', 0))
+        return int(self.tag(stream, 'NUMBER_OF_BYTES') or 0)
 
 
-    def prefer_audio(self, lang=None, xlang=['nar', 'NAR']):
+    def prefer_audio(self, lang=None, xlang=['nar', 'NAR'], defaultonly=False):
         # lang is a list of preferred languages (eg ['eng', 'fre']) or None
         # xlang is a list of languages to be excluded if lang is None
         # Returns a list of the audio tracks matching the specified language
         # or all audio tracks if lang is specified as None
+        # If default only return the default (or first) audio track
         # By default, this will accept all language tracks except nar (narration)
-        selected=[]
-        streamIDs={}    # Dictionary of known stream IDs
-        for stream in range(self.streams()):
-            if self.codec_type(stream)=='audio' and (lang==None and not self.language(stream)
-            in xlang or lang!=None and self.language(stream) in lang):
-                # Look out for duplicate streams on disk (eg DTS and DTS-HD)
-                # Keep the best (assumed to be the largest)
-                if self.sourceid(stream) != None:
-                    # Is this a new stream or a better version of an existing stream
-                    # otherwise we can ignore it (poorer version of known stream)
-                    # Use sourceid to try and avoid duplicates of same audio - this is a six figure code
-                    # eg 00 01 01. First four digits appear to identify main stream  and last two are sub id
-                    # and could indicate language, commentary etc.
-                    sourceid=self.sourceid(stream)
-                    if not sourceid in streamIDs or streamIDs[sourceid]['bytes'] < self.bytes(stream):
-                        # Deselect any previously selected entry
-                        if sourceid in streamIDs:
-                            selected.remove(streamIDs[sourceid]['stream'])
+        if defaultonly:
+            # Only looking for the default track
+            audio = [s for s in range(self.streams()) if self.codec_type(s) == 'audio']
+            defaults = [s for s in audio if self.default(s) == 1]
+            # First track flagged default, otherwise the first audio track
+            return (defaults or audio)[:1]
 
-                        # Select current stream
+        else:
+            # Find all matching tracks       
+            selected=[]
+            streamIDs={}    # Dictionary of known stream IDs
+            for stream in range(self.streams()):
+                if self.codec_type(stream)=='audio' and (lang==None and not self.language(stream)
+                in xlang or lang!=None and self.language(stream) in lang):
+                    # Look out for duplicate streams on disk (eg DTS and DTS-HD)
+                    # Keep the best (assumed to be the largest)
+                    if self.sourceid(stream) != None:
+                        # Is this a new stream or a better version of an existing stream
+                        # otherwise we can ignore it (poorer version of known stream)
+                        # Use sourceid to try and avoid duplicates of same audio - this is a six figure code
+                        # eg 00 01 01. First four digits appear to identify main stream  and last two are sub id
+                        # and could indicate language, commentary etc.
+                        sourceid=self.sourceid(stream)
+                        if not sourceid in streamIDs or streamIDs[sourceid]['bytes'] < self.bytes(stream):
+                            # Deselect any previously selected entry
+                            if sourceid in streamIDs:
+                                selected.remove(streamIDs[sourceid]['stream'])
+
+                            # Select current stream
+                            selected.append(stream)
+                            # And store it
+                            streamIDs[sourceid]={  'stream': stream, 'bytes': self.bytes(stream)}
+                    else:
+                        # No stream ID so add it anyway
                         selected.append(stream)
-                        # And store it
-                        streamIDs[sourceid]={  'stream': stream, 'bytes': self.bytes(stream)}
-                else:
-                    # No stream ID so add it anyway
-                    selected.append(stream)
-        return selected
+            return selected
 
 
-    def video_stream(self):
-        # Returns the first video stream
-        for i in range(self.streams()):
-            if self.codec_type(i) == 'video':
-                return i
-                break
+
+    def profile(self, stream):
+        return self.probe['streams'][stream].get('profile') or ''
+
+
+    def is_object_audio(self, stream):
+        # True for object-based audio (Dolby Atmos in TrueHD/E-AC3, DTS:X)
+        # ffprobe reports these in the profile, eg 'Dolby TrueHD + Dolby Atmos'
+        # or 'DTS-HD MA + DTS:X'
+        return re.search('Atmos|DTS:X', self.profile(stream)) is not None
+
+
+    def dolby_vision(self, stream):
+        # Returns the Dolby Vision profile number if present, otherwise None
+        for sd in self.probe['streams'][stream].get('side_data_list', []):
+            if sd.get('side_data_type') == 'DOVI configuration record':
+                return sd.get('dv_profile')
         return None
+
 
     def audiomap(self, streams, reencode=['pcm.*', 'flac', 'alac', 'dts', 'truehd'],
         codec='libvorbis', quality=5, map=0):
@@ -145,7 +200,10 @@ class FFProbe:
                 raise AssertionError('Expected an audio stream')
 
             encode.extend([ '-map', f'{map}:{i}' ])
-            if re.search('|'.join(reencode), self.codec_name(i)):
+            # Object audio (Atmos, DTS:X) is always copied so it can be used
+            # if height speakers are added later -- it cannot be recovered
+            # from a re-encode
+            if re.search('|'.join(reencode), self.codec_name(i)) and not self.is_object_audio(i):
                 encode.extend([ f'-c:a:{s}', codec ])
                 encode.extend([ f'-q:a:{s}', f'{quality}' ])
             else:
@@ -155,23 +213,22 @@ class FFProbe:
         return encode
 
 
-class CropDetect:
-    # Identifies the points to crop a video
-    def __init__(self, video_file, skip=.1):
-        probe=FFProbe(video_file)
-        # Points to start and stop searching the file
-        video_stream=probe.video_stream()
-        if probe.duration(video_stream) is not None:
-            trim=[ '-ss', str(skip*probe.duration(video_stream)),
-                '-to', str(probe.duration(video_stream)*(1-skip)) ]
+    def crop(self, trimX=0, trimY=0, skip=.1):
+        # Returns a crop filter to remove any letter box (this will pick the largest if the letterbox changes)
+        # Size of frame is reduced by trimX and trimY
+        # skip indicates proportion of start and end to ignore
+
+        if self.duration() is not None:
+            trim=[ '-ss', f'{skip*self.duration()}',
+                '-to', f'{self.duration()*(1-skip)}' ]
         else:
             trim=[]
 
         # top left box to "delogo" video
-        tlbox=f'0:0:{int(probe.width(video_stream)/6)}:{int(probe.height(video_stream)/5.7)}:black:t=fill'
+        tlbox=f'0:0:{int(self.width()/6)}:{int(self.height()/5.7)}:black:t=fill'
         # cropdetect=24:2:0 means set black threshold to 24/255 (default), round crop to 2 pixels (even only) (default 16), and
         # skip no frames at the start
-        crop = subprocess.run([ 'ffmpeg' ] + trim + [ '-i', video_file,
+        crop = subprocess.run([ 'ffmpeg' ] + trim + [ '-i', self._file,
             '-vf', f'drawbox={tlbox},cropdetect=24:2:0', '-f', 'null', '-' ] ,
             capture_output=True,
             universal_newlines=True)
@@ -189,48 +246,120 @@ class CropDetect:
             # We have a match -- therefore pull out all the values
             split1=match.split('=')
             split2=split1[1].split(':')
-            self.w=int(split2[0])
-            self.h=int(split2[1])
-            self.x=int(split2[2])
-            self.y=int(split2[3])
-            if self.w < 1 or self.h < 1:
-                self.w = None
-                self.h = None
-                self.x = None
-                self.y = None
-
+            w=int(split2[0]) - 2*trimX
+            h=int(split2[1]) - 2*trimY
+            x=int(split2[2]) + trimX
+            y=int(split2[3]) + trimY
+            if w > 1 and h > 1 and (w < self.width() or h < self.height()):
+                return f'crop={w}:{h}:{x}:{y}'
+            else:
+                return None
+                
         else:
-            # No match -- return null results
-            self.w = None
-            self.h = None
-            self.x = None
-            self.y = None
+            return None
 
 
-    def trim_x(self, x=8):
-        # Reduces the horizontal (x) size of the image
-        # Test x and w to make sure its not a null result
-        if self.w:
-            self.w -= 2*x
-            self.x += x
+    def crf(self, grain=False):
+        # Returns a crf factor (constant quality) based on the image size of the video
+        if self.codec_name(self.video0) == 'mpeg2video' and self.width() <= 720:
+            # mpeg2 -- so use 20
+            f = 20
+        else:    
+            try:
+                # Try to scale quality based on image width
+                f = 18 + round(math.log2(self.width()/1920), 1)
+            except (TypeError, ZeroDivisionError):
+                # Default value
+                f = 20
 
-    def trim_y(self, y=8):
-        # Reduces the vertical (y) size of the image
-        # Test h and y to make sure its not a null result
-        if self.h:
-            self.h -= 2*y
-            self.y += y
+        # If a grainy film (grain is True) improve quality by 2
+        return f - 2 * grain
 
-    def filter(self):
-        # Returns the ffmpeg filter (if not null) (if not specified, a None will be returned)
-        # Just check width and height (must be not null and not zero)
-        if self.w and self.h:
-            return f'crop={self.w}:{self.h}:{self.x}:{self.y}'
 
+
+
+def extract_rpu(video_file, rpu_file):
+    # Extracts the Dolby Vision RPU (per-frame metadata) with dovi_tool:
+    #   -m 2  converts it to profile 8.1 (single layer, no enhancement layer)
+    #   -c    zeroes the letterbox (active area) offsets, as the video is cropped
+    # Returns the RPU file, or None on failure
+    with tempfile.TemporaryFile() as ffmpeg_err:
+        extract = subprocess.Popen([ 'ffmpeg', '-loglevel', 'error', '-i', str(video_file),
+                '-map', '0:v:0', '-c:v', 'copy', '-bsf:v', 'hevc_mp4toannexb', '-f', 'hevc', '-' ],
+                stdout=subprocess.PIPE, stderr=ffmpeg_err)
+        dovi = subprocess.Popen([ 'dovi_tool', '-m', '2', '-c', 'extract-rpu', '-', '-o', str(rpu_file) ],
+                stdin=extract.stdout, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        # Close our copy of the pipe, so ffmpeg stops if dovi_tool fails
+        extract.stdout.close()
+        dovi_err = dovi.communicate()[1]
+        extract.wait()
+        if dovi.returncode == 0 and extract.returncode == 0 and rpu_file.is_file():
+            return rpu_file
+        ffmpeg_err.seek(0)
+        print(f'{video_file}: Dolby Vision RPU extraction failed')
+        print(ffmpeg_err.read().decode(errors='replace'), dovi_err)
+        rpu_file.unlink(missing_ok=True)
+        return None
+
+
+def encode_with_rpu(video_file, probe, video_opts, audio_opts, rpu_file, tmp, outfile):
+    # Cropped Dolby Vision encode. x265's own RPU option only works in the x265
+    # command-line program, not when FFmpeg uses x265 as a library, so the RPU
+    # is added after encoding instead:
+    #   1. one ffmpeg pass writes the video as raw HEVC (no Dolby Vision), plus
+    #      the audio and subtitles to a separate Matroska file
+    #   2. dovi_tool injects the corrected RPU into the raw HEVC
+    #   3. mkvmerge combines the video with the audio, subtitles and chapters
+    # Returns True on success. Intermediate files are removed as it goes.
+    video = tmp / 'video.hevc'
+    video_dv = tmp / 'video_dv.hevc'
+    others = tmp / 'others.mkv'
+
+    def failed(stage, command, result):
+        print(f'{video_file}: {stage} failed')
+        print(command)
+        print(f'Return Code: {result.returncode}')
+        print(result.stdout, result.stderr)
+        for f in (video, video_dv, others, outfile):
+            f.unlink(missing_ok=True)
+        return False
+
+    # 1. Encode. -fps_mode passthrough stops ffmpeg duplicating frames to make
+    # the raw HEVC constant frame rate, which would misalign the RPU
+    # (no +global_header here -- a raw HEVC file needs its headers in-stream)
+    command = [ 'ffmpeg', '-y', '-loglevel', 'warning', '-i', str(video_file),
+            '-map', '0:v:0', '-fps_mode', 'passthrough' ] + video_opts + [ '-f', 'hevc', str(video) ]
+    has_others = bool(audio_opts) or probe.has_subtitles()
+    if has_others:
+        command += audio_opts + [ '-map', '0:s?', '-c:s', 'copy', str(others) ]
+    result = subprocess.run(command, capture_output=True, encoding='utf-8')
+    if result.returncode != 0:
+        return failed('encode', command, result)
+
+    # 2. Inject the RPU. A frame count mismatch means the metadata would be
+    # misaligned, so treat it as a failure (and keep the original)
+    command = [ 'dovi_tool', 'inject-rpu', '-i', str(video), '--rpu-in', str(rpu_file), '-o', str(video_dv) ]
+    result = subprocess.run(command, capture_output=True, encoding='utf-8')
+    if result.returncode != 0 or 'mismatched lengths' in result.stdout + result.stderr:
+        return failed('Dolby Vision RPU injection', command, result)
+    video.unlink()
+
+    # 3. Mux. mkvmerge detects the Dolby Vision metadata and writes correct
+    # statistics tags. Exit code 1 means warnings only -- the file is fine
+    command = [ 'mkvmerge', '-o', str(outfile),
+            '--default-duration', f'0:{probe.frame_rate()}p', str(video_dv) ]
+    if has_others:
+        command += [ str(others) ]
+    result = subprocess.run(command, capture_output=True, encoding='utf-8')
+    if result.returncode > 1:
+        return failed('mkvmerge', command, result)
+    video_dv.unlink()
+    others.unlink(missing_ok=True)
+    return True
 
 
 def server(servernamefile=Path('/usr/local/etc/servername')):
-    if not servernamefile.is_file:
+    if not servernamefile.is_file():
         raise OSError('servername not specified')
     with open(servernamefile, 'r', encoding='utf-8') as f:
         return f.readline().strip()
@@ -257,27 +386,16 @@ def file(value):
 
 
 if __name__ == '__main__':
-
-    videoCodec=Path(sys.argv[0]).stem
-    encoder={'h265': 'libx265',
-            'av1': 'libaom-av1'
-            }
-    crf={'h265': {'high': 17, 'med': 20, 'low': 23},
-        'av1': {'high': 23, 'med': 25, 'low': 27}
-        }
     
     # Options for colour depth
     depth = { 8: 'yuv420p',
              10: 'yuv420p10le',
              12: 'yuv420p12le',
              14: 'yuv420p14le'}
-    depthdefault = {'h265': 10, 'av1': 8}
-    quality='med'
+    depthdefault =  10
     lang=None #Default to including all languages
     suffix='.mkv'
 
-    if not videoCodec in encoder:
-        raise SystemExit(f'{videoCodec} is not supported')
 
     # Read some arguments!
     parser = argparse.ArgumentParser(description='Converts video files to h265 format')
@@ -285,20 +403,20 @@ if __name__ == '__main__':
                    help='Filename to be converted')
     # Crop options
     parser.add_argument('-c', action='store_true', help="Don't auto crop")
-    parser.add_argument('-x', action='store_true', help='crop the left and right of the image')
-    parser.add_argument('-y', action='store_true', help='crop the top and bottom of the image')
+    parser.add_argument('-x', action='count', default=0, help='crop 8 pixels from both sides (repeat as required)')
+    parser.add_argument('-y', action='count', default=0, help='crop 8 pixels from top and bottom (repeat as required)')
 
     # Quality options
-    parser.add_argument('-H', action='store_true', help='higher quality encode')
-    parser.add_argument('-l', action='store_true', help='lower quality encode')
+    parser.add_argument('-g', action='store_true', help='adjust for film grain')
     parser.add_argument('-n', metavar='level', type=nlm_strength, default=None,
         help='Use noise reducing filter, (strength 1 - 30)')
     parser.add_argument('-d', metavar='bit_depth', help='specify colour bit depth',
-                         choices=list(depth.keys()), action='store', default=depthdefault[videoCodec], type=int)
+                         choices=list(depth.keys()), action='store', default=depthdefault, type=int)
 
     # Select required audio language(s)
     parser.add_argument('-L', metavar='lang', action='append',
     help='Specify audio language(s) to include (default:all)')
+    parser.add_argument('-a', action='store_true', help="Only default audio")
 
     # Aspect ratio options
     parser.add_argument('-w', action='store_true', help="Wide screen (16x9) aspect ratio")
@@ -327,68 +445,130 @@ if __name__ == '__main__':
 
     else:
         # Background mode -- process conversion
-       for i in args.file_to_convert:
-            video_filter=['bwdif=1:-1:1']   # Always deinterlace
+        for i in args.file_to_convert:
+            # Probe the source first -- its properties decide the filters
+            probe=FFProbe(i)
+            source_codec=probe.codec_name(probe.video0)
+            dv_profile=probe.dolby_vision(probe.video0)
+
+            video_filter=[]
+            # Deinterlace (flagged interlaced frames only) -- but not for HEVC
+            # or AV1 sources, which are never interlaced disc content
+            if source_codec not in ('hevc', 'av1'):
+                video_filter.append('bwdif=1:-1:1')
+
             # Any noise filter
             if args.n:
                 video_filter.append(f'nlmeans=s={args.n}')
 
-            # Apply quality
-            if args.H:
-                quality='high'
-            if args.l:
-                quality='low'
 
-            # Crop if required
+            # Temporary working directory (output file, and any RPU file)
+            tmp = Path(tempfile.mkdtemp())
+            rpu_file = None
+
+            # Crop if required.
+            # Dolby Vision metadata describes the letterbox bars, so a cropped
+            # Dolby Vision encode needs its RPU extracted and corrected by
+            # dovi_tool, then injected after encoding (see encode_with_rpu).
+            # Without dovi_tool and mkvmerge (or for profiles other than 7 and 8,
+            # eg streaming profile 5), Dolby Vision sources are left uncropped
+            # and FFmpeg passes the metadata through unchanged
             if not args.c:
-                cd=CropDetect(i)
-                if args.x:
-                    cd.trim_x()
+                if dv_profile is None:
+                    crop_filter = probe.crop(args.x * 8, args.y * 8)
+                elif dv_profile in (7, 8) and shutil.which('dovi_tool') and shutil.which('mkvmerge'):
+                    crop_filter = probe.crop(args.x * 8, args.y * 8)
+                    if crop_filter:
+                        rpu_file = extract_rpu(i, tmp / 'RPU.bin')
+                        if rpu_file is None:
+                            print(f'{i}: encoding uncropped, with Dolby Vision passthrough')
+                            crop_filter = None
+                else:
+                    if dv_profile in (7, 8):
+                        print(f'{i}: dovi_tool or mkvmerge not installed -- Dolby Vision source left uncropped')
+                    else:
+                        print(f'{i}: Dolby Vision profile {dv_profile} -- left uncropped')
+                    crop_filter = None
 
-                if args.y:
-                    cd.trim_y()
-
-                # Is there a valid filter result?
-                if cd.filter():
-                    video_filter.append(cd.filter())
+                if crop_filter:
+                    video_filter.append(crop_filter)
 
             # Select audio stream(s)
             if args.L:
                 lang=args.L
 
-            probe=FFProbe(i)
-            audio=probe.prefer_audio(lang)
+            audio=probe.prefer_audio(lang, defaultonly=args.a)
 
-             # Process aspect ratio
+            # Process aspect ratio
             if args.w:
-                video_filter.append('setsar='+str(probe.height(probe.video_stream())/
-                probe.width(probe.video_stream())*16/9))
+                video_filter.append(f'setsar={probe.height()/probe.width()*16/9}')
             if args.s:
-                video_filter.append('setsar='+str(probe.height(probe.video_stream())/
-                probe.width(probe.video_stream())*4/3))
+                video_filter.append(f'setsar={probe.height()/probe.width()*4/3}')
 
-            # Build video filter
-            vf = ','.join(video_filter)
+            # Video encoder options
+            video_opts=[ '-c:v', 'libx265', 
+                        '-preset', 'slow', 
+                        '-crf', f'{probe.crf(args.g)}',
+                        '-pix_fmt', depth[args.d] ]
 
-            tmp = Path(tempfile.mkdtemp())
+            # fix bug in libx265 v4.1 'frame-threads=1'
+            # SAO reduces file sizes, it has a tendency to aggressively smooth out fine details and completely erase organic film grain
+            # giving faces a "waxy" or blurred look.
+            x265_params=[ 'frame-threads=1', 'no-sao=1' ]
+            if dv_profile is not None:
+               x265_params += ['level-idc=5.1', 'high-tier=1',
+                        'vbv-maxrate=160000', 'vbv-bufsize=160000' ]
+
+            if args.g:
+                x265_params += ['psy-rdoq=1']
+
+            if rpu_file:
+                # Cropped: encode without Dolby Vision -- the corrected
+                # RPU is injected afterwards by encode_with_rpu()
+                video_opts += [ '-dolbyvision', '0' ]
+            elif dv_profile is not None:
+                # Uncropped: FFmpeg passes the metadata through,
+                # converting it to profile 8.1
+                video_opts += [ '-dolbyvision', '1' ]
+
+            video_opts += [ '-x265-params', ':'.join(x265_params) ]
+
+
+            # Only pass a filter if there is one (an empty -vf is an error)
+            if video_filter:
+                video_opts += [ '-vf', ','.join(video_filter) ]
+
             outfile = tmp / i.with_suffix(suffix).name
+            if rpu_file:
+                # Cropped Dolby Vision -- encode, inject RPU, and mux
+                success = encode_with_rpu(i, probe, video_opts, probe.audiomap(audio),
+                        rpu_file, tmp, outfile)
+            else:
+                command = [ 'ffmpeg', '-y', '-loglevel', 'warning', '-i', f'{i}',
+                        '-flags', '+global_header', '-map', '0:v:0' ] + video_opts + \
+                        probe.audiomap(audio) + ['-map', '0:s?', '-c:s', 'copy', str(outfile) ]
 
-            command = [ 'ffmpeg', '-y', '-i', str(i), '-flags', '+global_header', '-map',
-                    '0:v:0', '-c:v', encoder[videoCodec], '-crf', f'{crf[videoCodec][quality]}',
-                    '-pix_fmt', depth[args.d], '-vf', vf ] + probe.audiomap(audio) + ['-map', '0:s?',
-                    '-c:s', 'copy', str(outfile) ]
+                encode = subprocess.run(command, capture_output=True, encoding='utf-8')
+                success = encode.returncode == 0
+                if success:
+                    # Replace the size/bitrate statistics tags copied from the
+                    # source with correct ones (needs mkvtoolnix)
+                    if shutil.which('mkvpropedit'):
+                        subprocess.run([ 'mkvpropedit', '--add-track-statistics-tags', str(outfile) ],
+                                capture_output=True)
+                else:
+                    # Show the command and the error message
+                    print (command)
+                    print (f'Return Code: {encode.returncode}')
+                    print (encode.stderr)
+                    outfile.unlink(missing_ok=True)
 
-            encode = subprocess.run(command, capture_output=True, encoding='utf-8')
-            # Check it worked
-            if encode.returncode == 0:
+            if success:
                 # Delete original and replace with the new version
                 i.unlink()
                 shutil.move(outfile, i.with_suffix(suffix))
-            else:
-                # Show the command and the error message
-                print (command)
-                print (encode.stderr)
-                outfile.unlink()
 
-            # Tidy up -- remove the temporary directory
+            # Tidy up -- remove any RPU file and the temporary directory
+            if rpu_file:
+                rpu_file.unlink(missing_ok=True)
             tmp.rmdir()
